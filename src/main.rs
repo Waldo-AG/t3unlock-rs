@@ -59,8 +59,7 @@ fn real_main() -> Result<()> {
             }
 
             let pass = password.unwrap_or_else(|| {
-                rpassword::prompt_password("Enter drive password: ")
-                    .unwrap_or_default()
+                read_password_interactive()
             });
 
             let res = usb::unlock(&sel, pass.as_bytes(), timeout_ms);
@@ -88,4 +87,33 @@ fn real_main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Read password interactively — tries stdin first, falls back to /dev/tty.
+/// This ensures sudo and other scenarios where stdin is not a terminal still work.
+fn read_password_interactive() -> String {
+    // Try stdin first if it's a tty
+    if atty::is(atty::Stream::Stdin) {
+        if let Ok(pass) = rpassword::prompt_password("Enter drive password: ") {
+            if !pass.is_empty() {
+                return pass;
+            }
+        }
+    }
+
+    // Fallback: read from /dev/tty (direct terminal, bypasses sudo stdin redirect)
+    if let Ok(fd) = std::fs::File::open("/dev/tty") {
+        use std::io::{BufRead, Write};
+        let mut tty = fd;
+        let stdout = std::io::stdout();
+        let _ = write!(stdout, "Enter drive password: ");
+        let _ = stdout.flush();
+        let mut line = String::new();
+        if std::io::BufReader::new(&mut tty).read_line(&mut line).is_ok() {
+            return line.trim_end().to_string();
+        }
+    }
+
+    rpassword::prompt_password("Enter drive password: ")
+        .unwrap_or_default()
 }
