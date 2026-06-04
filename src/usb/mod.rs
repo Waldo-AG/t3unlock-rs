@@ -63,10 +63,13 @@ pub fn unlock(sel: &DeviceSelector, password: &[u8], timeout_ms: Option<u64>) ->
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(3000));
     let mut handle = find_device(sel).context("device not found")?;
 
-    // Detach kernel driver if needed (Linux/macOS)
-    if let Ok(true) = handle.kernel_driver_active(proto::INTERFACE) {
-        handle.detach_kernel_driver(proto::INTERFACE)
-            .context("failed to detach kernel driver")?;
+    // Detach kernel driver if needed (Linux only — not needed on macOS)
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(true) = handle.kernel_driver_active(proto::INTERFACE) {
+            handle.detach_kernel_driver(proto::INTERFACE)
+                .context("failed to detach kernel driver")?;
+        }
     }
 
     // Claim interface
