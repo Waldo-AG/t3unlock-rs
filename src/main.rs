@@ -105,7 +105,7 @@ fn read_password_interactive() -> String {
     if let Ok(fd) = std::fs::File::open("/dev/tty") {
         use std::io::{BufRead, Write};
         let mut tty = fd;
-        let stdout = std::io::stdout();
+        let mut stdout = std::io::stdout();
         let _ = write!(stdout, "Enter drive password: ");
         let _ = stdout.flush();
         let mut line = String::new();
