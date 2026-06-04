@@ -1,19 +1,15 @@
 [package]
-name = "t3unlock-rs"
-version = "0.1.0"
+name = "t3unlock"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "Linux-first Rust CLI to unlock Samsung Portable SSD T3 (scaffold)."
-repository = "https://example.com/t3unlock-rs"
-readme = "README.md"
-keywords = ["usb", "samsung", "ssd", "t3", "linux"]
+description = "Cross-platform CLI to unlock Samsung Portable SSD T1/T3/T5"
+repository = "https://github.com/Foxtrot-Zulu/t3unlock-rs"
+keywords = ["usb", "samsung", "ssd", "t3", "portable-ssd"]
 categories = ["command-line-utilities", "hardware-support"]
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 anyhow = "1"
-thiserror = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 clap_mangen = "0.2"
@@ -21,15 +17,14 @@ rusb = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 rpassword = "7"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
-
-[features]
-integration = []   # enables integration tests that would touch USB (mocked by default)
-mangen = []        # enable man-page generation command
 
 [[bin]]
 name = "t3unlock"

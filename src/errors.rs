@@ -12,6 +12,8 @@ pub enum UsbError {
     Timeout,
     #[error("I/O error")]
     Io,
+    #[error("Bad password")]
+    BadPassword,
     #[error("{0}")]
     Other(String),
 }

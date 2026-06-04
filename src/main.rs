@@ -1,13 +1,12 @@
-//! t3unlock-rs: Linux-first Rust CLI scaffold to unlock Samsung Portable SSD T3.
+//! t3unlock: Cross-platform CLI to unlock Samsung Portable SSD T1/T3/T5.
 //!
-//! This is a scaffold with a **dry-run** capable flow and a separable USB layer.
-//! The actual vendor/protocol constants must be verified on a real device.
-//!
-//! See `docs/protocol.md` for notes and TODOs.
+//! Protocol: bulk transfers (NOT control transfers).
+//!   - OUT endpoint: 0x02
+//!   - IN endpoint:  0x81
+//!   - Sequence: unlock(31B) → password(512B) → relink(31B)
 
 mod cli;
 mod errors;
-mod logging;
 mod usb;
 
 use anyhow::Result;
@@ -22,43 +21,71 @@ fn main() {
 }
 
 fn real_main() -> Result<()> {
-    logging::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive("t3unlock=info".parse()?))
+        .init();
+
     let cli = Cli::parse();
 
     match cli.cmd {
-        Commands::Status { vid, pid, json } => {
-            let dev = usb::DeviceSelector::from_cli(vid, pid);
-            let status = usb::status(&dev)?;
+        Commands::Status { model, json } => {
+            let m = usb::Model::from_str(&model)
+                .ok_or_else(|| anyhow::anyhow!("unknown model: {}", model))?;
+            let sel = usb::DeviceSelector::new(m);
+            let status = usb::status(&sel)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
-                println!("Device: {}", status.device_label);
+                println!("Model:   {}", status.model);
+                println!("VID:     0x{:04x}", status.vid);
+                println!("PID:     0x{:04x}", status.pid);
                 println!("Present: {}", status.present);
                 println!("Locked:  {}", status.locked.unwrap_or(false));
+                println!("EP OUT:  0x{:02x}", status.ep_out);
+                println!("EP IN:   0x{:02x}", status.ep_in);
             }
         }
-        Commands::Unlock { vid, pid, password, dry_run, timeout_ms } => {
-            let dev = usb::DeviceSelector::from_cli(vid, pid);
-            let mut secret = password.unwrap_or_else(|| rpassword::prompt_password("Enter drive password: ").unwrap_or_default());
-            let res = usb::unlock(&dev, secret.as_bytes(), dry_run, timeout_ms);
-            zeroize::Zeroize::zeroize(&mut secret);
-            res?;
+
+        Commands::Unlock { model, password, dry_run, timeout_ms } => {
+            let m = usb::Model::from_str(&model)
+                .ok_or_else(|| anyhow::anyhow!("unknown model: {}", model))?;
+            let sel = usb::DeviceSelector::new(m);
+
             if dry_run {
-                info!("DRY RUN: simulated unlock complete.");
-            } else {
-                println!("Unlock complete.");
+                info!(model = %m.label(), "DRY RUN: would perform unlock sequence");
+                println!("DRY RUN: unlock sequence simulated");
+                return Ok(());
             }
+
+            let pass = password.unwrap_or_else(|| {
+                rpassword::prompt_password("Enter drive password: ")
+                    .unwrap_or_default()
+            });
+
+            let res = usb::unlock(&sel, pass.as_bytes(), timeout_ms);
+
+            // Zero the password no matter what
+            let mut p = pass.into_bytes();
+            zeroize::Zeroize::zeroize(&mut p);
+
+            res?;
+            println!("Unlock successful.");
         }
+
         Commands::Doctor {} => {
             let report = usb::doctor()?;
             println!("{}", report);
         }
+
         Commands::GenCompletions { shell } => {
             cli::gen_completions(shell)?;
         }
+
         Commands::GenMan { out } => {
             cli::gen_man(out)?;
         }
     }
+
     Ok(())
 }

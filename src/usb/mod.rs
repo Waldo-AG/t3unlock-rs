@@ -1,111 +1,124 @@
-mod lowlevel;
+//! USB device discovery and unlock orchestration.
+//!
+//! Supports T1/T3/T5 Samsung Portable SSD locked variants.
+
+mod model;
 mod proto;
+
+pub use model::Model;
 
 use crate::errors::UsbError;
 use anyhow::Context;
 use rusb::{DeviceHandle, GlobalContext};
 use serde::Serialize;
+use std::time::Duration;
 
+/// USB device selector
 #[derive(Clone, Debug)]
 pub struct DeviceSelector {
     pub vid: u16,
     pub pid: u16,
+    pub model: Model,
 }
 
 impl DeviceSelector {
-    pub fn defaults() -> Self {
-        // Samsung Electronics VID is commonly 0x04e8; PID here is a placeholder.
-        let vid = parse_hex_env("T3UNLOCK_VID").unwrap_or(0x04e8);
-        let pid = parse_hex_env("T3UNLOCK_PID").unwrap_or(0x61f1);
-        Self { vid, pid }
-    }
-
-    pub fn from_cli(vid: Option<String>, pid: Option<String>) -> Self {
-        let mut sel = Self::defaults();
-        if let Some(v) = vid.and_then(|s| u16::from_str_radix(s.trim_start_matches("0x"), 16).ok()) {
-            sel.vid = v;
+    pub fn new(model: Model) -> Self {
+        Self {
+            vid: 0x04e8,
+            pid: model.locked_pid(),
+            model,
         }
-        if let Some(p) = pid.and_then(|s| u16::from_str_radix(s.trim_start_matches("0x"), 16).ok()) {
-            sel.pid = p;
-        }
-        sel
     }
-}
-
-fn parse_hex_env(key: &str) -> Option<u16> {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| u16::from_str_radix(s.trim_start_matches("0x"), 16).ok())
 }
 
 #[derive(Debug, Serialize)]
 pub struct Status {
-    pub device_label: String,
+    pub model: String,
+    pub vid: u16,
+    pub pid: u16,
     pub present: bool,
     pub locked: Option<bool>,
+    pub interface: u8,
+    pub ep_out: u8,
+    pub ep_in: u8,
 }
 
+/// Discover device and check if it's locked.
 pub fn status(sel: &DeviceSelector) -> anyhow::Result<Status> {
     let present = find_device(sel).is_ok();
     Ok(Status {
-        device_label: format!("VID=0x{vid:04x} PID=0x{pid:04x}", vid = sel.vid, pid = sel.pid),
+        model: sel.model.label().to_string(),
+        vid: sel.vid,
+        pid: sel.pid,
         present,
-        // Placeholder: assume locked when present until real protocol is wired.
-        locked: present.then(|| true),
+        locked: present.then(|| true), // assume locked until proven otherwise
+        interface: proto::INTERFACE,
+        ep_out: proto::EP_OUT,
+        ep_in: proto::EP_IN,
     })
 }
 
-pub fn unlock(
-    sel: &DeviceSelector,
-    password: &[u8],
-    dry_run: bool,
-    timeout_ms: Option<u64>,
-) -> anyhow::Result<()> {
-    if dry_run {
-        tracing::info!("DRY RUN: would discover device and perform control transfers to unlock.");
-        tracing::info!("DRY RUN: password length = {}", password.len());
-        return Ok(());
+/// Perform the full unlock sequence.
+pub fn unlock(sel: &DeviceSelector, password: &[u8], timeout_ms: Option<u64>) -> anyhow::Result<()> {
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(3000));
+    let mut handle = find_device(sel).context("device not found")?;
+
+    // Detach kernel driver if needed (Linux/macOS)
+    if let Ok(true) = handle.kernel_driver_active(proto::INTERFACE) {
+        handle.detach_kernel_driver(proto::INTERFACE)
+            .context("failed to detach kernel driver")?;
     }
 
-    let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(5000));
-    let mut handle = find_device(sel)?;
+    // Claim interface
+    handle
+        .claim_interface(proto::INTERFACE)
+        .map_err(map_libusb)?;
 
-    // Claim interface & perform protocol sequence
-    let iface = proto::INTERFACE;
-    handle.claim_interface(iface).map_err(map_libusb)?;
+    // Run unlock protocol
+    let result = proto::unlock(&mut handle, sel.model, password, timeout);
 
-    // Send password frame (placeholder protocol)
-    let frame = proto::build_password_frame(password);
-    proto::send_unlock_frame(&mut handle, &frame, timeout)?;
-
-    // Check locked state (placeholder protocol)
-    let locked = proto::query_locked(&mut handle, timeout)?;
-    if locked {
-        return Err(anyhow::anyhow!(UsbError::BadPassword).context("device still reports locked"));
+    // Release on error, best-effort on success
+    if result.is_err() {
+        let _ = handle.release_interface(proto::INTERFACE);
+    } else {
+        handle.release_interface(proto::INTERFACE).ok();
     }
-    Ok(())
+
+    result
 }
 
 pub fn doctor() -> anyhow::Result<String> {
-    let mut lines = vec![];
-    lines.push("Doctor checks:");
-    lines.push("- Is the device connected? Use: `lsusb | grep -i samsung`.");
-    lines.push("- If running without sudo, install udev rule from contrib/udev/99-t3unlock.rules, then:");
-    lines.push("  sudo udevadm control --reload-rules && sudo udevadm trigger");
-    lines.push("- Ensure current user is in the plugdev group (or distribution equivalent).");
-    lines.push("- Try setting env VID/PID if detection fails: T3UNLOCK_VID=04e8 T3UNLOCK_PID=61f1");
-    Ok(lines.join("\n"))
+    Ok(vec![
+        "=== t3unlock doctor ===",
+        &format!("VID: 0x{:04x} (Samsung Electronics)", 0x04e8),
+        &format!("T1 locked PID: 0x{:04x}, normal PID: 0x{:04x}", 0x61f2, 0x61f1),
+        &format!("T3 locked PID: 0x{:04x}, normal PID: 0x{:04x}", 0x61f4, 0x61f3),
+        &format!("T5 locked PID: 0x{:04x}, normal PID: 0x{:04x}", 0x61f6, 0x61f5),
+        "",
+        "Linux:",
+        "  - Add udev rule: SUBSYSTEM==\"usb\", ATTR{{idVendor}}==\"04e8\", MODE=\"0666\"",
+        "  - Or run as root",
+        "",
+        "macOS:",
+        "  - No extra setup needed (root not required for bulk transfers)",
+        "  - If denied, check System Preferences → Privacy & Security → USB",
+        "",
+        "Verify device:",
+        "  Linux: lsusb -d 04e8:",
+        "  macOS: system_profiler SPUSBDataType | grep -i samsung",
+    ]
+    .join("\n"))
 }
 
 fn find_device(sel: &DeviceSelector) -> anyhow::Result<DeviceHandle<GlobalContext>> {
     for device in rusb::devices().map_err(map_libusb)?.iter() {
         let desc = device.device_descriptor().map_err(map_libusb)?;
-        if desc.vendor_id() == sel.vid && desc.product_id() == sel.pid {
+        if desc.vendor_id() == sel.vid && (desc.product_id() == sel.pid || desc.product_id() == sel.model.normal_pid()) {
             let handle = device.open().map_err(map_libusb)?;
             return Ok(handle);
         }
     }
-    Err(anyhow::anyhow!(UsbError::NotFound).context("No matching USB device found"))
+    Err(anyhow::anyhow!(UsbError::NotFound))
 }
 
 fn map_libusb(e: rusb::Error) -> anyhow::Error {
